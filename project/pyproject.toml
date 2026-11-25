@@ -1,0 +1,39 @@
+# Local environment for editor tooling only. Code runs in the Umbrella container
+# (Isaac Sim 6.2.0, Isaac Lab 3.0.0, Python 3.12)
+[project]
+name = "sim-project"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "isaaclab==3.0.0",
+    "isaacsim-core==6.2.0.0",
+    "isaacsim-sensor==6.2.0.0",
+    "isaacsim-kernel==6.2.0.0",
+    "numpy",  # isaacsim-kernel pins its own version
+    "pillow==12.3.0",
+    "usd-core",
+    "torch==2.11.0",  # Isaac Lab's pins, listed so the CPU source below applies
+    "torchvision==0.26.0",
+]
+
+[tool.uv]
+package = false
+# NVIDIA's docs install with pip --extra-index-url, which picks the best version
+# across both indexes; Isaac's pins need packages from each
+index-strategy = "unsafe-best-match"
+# Isaac Lab 3.0's own [tool.uv] overrides, for pins Isaac Sim 6.2 sets stricter than needed
+override-dependencies = ["urllib3>=2.8.0", "fsspec>=2026.6.0", "packaging>=20,<27"]
+# Isaac Lab pins torch; the CPU build gives scene code the same types
+# without the CUDA libraries (~4 GB) that type checking doesn't need
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

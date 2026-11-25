@@ -21,7 +21,9 @@ import time
 import uuid
 
 import desktop
+import projectsync
 import relay
+import rendering
 import scheduler
 
 SOURCE = pathlib.Path(__file__).resolve().parent
@@ -33,6 +35,8 @@ FILES = (
     "simproto",
     "scheduler.py",
     "runtime.py",
+    "rendering.py",
+    "projectsync.py",
     "relay.py",
     "desktop.py",
     "smoke.py",
@@ -305,6 +309,34 @@ def parser() -> argparse.ArgumentParser:
     stop.add_argument(
         "session", nargs="?", help="Full or short session ID; omit to stop all"
     )
+    render = commands.add_parser(
+        "render", help="Render a project scene to mp4 in a session's job"
+    )
+    render.add_argument(
+        "--session", help="Full or short ID; needed when several sessions are active"
+    )
+    render.add_argument(
+        "--project",
+        default=os.environ.get("SIMPROTO_PROJECT", str(SOURCE / "project")),
+        help="Local project directory, mirrored to the session's project",
+    )
+    lifetime = render.add_mutually_exclusive_group()
+    lifetime.add_argument(
+        "--worker",
+        action="store_true",
+        help="Keep Isaac loaded in the job so later renders start faster",
+    )
+    lifetime.add_argument("--stop-worker", action="store_true")
+    render.add_argument("scene", nargs="?", help="Scene file inside the project")
+    render.add_argument(
+        "options", nargs=argparse.REMAINDER, help="render.py options, e.g. --seconds 4"
+    )
+    steps = commands.add_parser("_render", help=argparse.SUPPRESS)
+    steps.add_argument(
+        "step", choices=("sync", "worker", "stop", "run", "fetch", "queue")
+    )
+    steps.add_argument("--session")
+    steps.add_argument("arguments", nargs=argparse.REMAINDER)
     internal = commands.add_parser("_work", help=argparse.SUPPRESS)
     internal.add_argument("session")
     return result
@@ -320,18 +352,22 @@ def client_command(host: str) -> str:
     return shlex.join(arguments)
 
 
-def remote(host: str, arguments: list[str]) -> int:
-    """Runs the remote launcher over SSH, quoting each argument."""
-    arguments = ["--client-command=" + client_command(host), *arguments]
+def ssh_command(host: str, arguments: list[str]) -> list[str]:
+    """Builds the SSH command that runs the remote launcher, quoting each argument."""
     command = 'exec python3 "$HOME/simproto/simproto" --remote ' + shlex.join(arguments)
-    return subprocess.call(["ssh", "-o", "ConnectTimeout=20", host, command])
+    return ["ssh", "-o", "ConnectTimeout=20", host, command]
+
+
+def remote(host: str, arguments: list[str]) -> int:
+    """Runs the remote launcher over SSH."""
+    arguments = ["--client-command=" + client_command(host), *arguments]
+    return subprocess.call(ssh_command(host, arguments))
 
 
 def remote_json(host: str, arguments: list[str]) -> dict:
     """Reads JSON from the remote launcher while stderr reports progress."""
-    command = 'exec python3 "$HOME/simproto/simproto" --remote ' + shlex.join(arguments)
     result = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=20", host, command],
+        ssh_command(host, arguments),
         stdout=subprocess.PIPE,
         text=True,
         encoding="utf-8",
@@ -409,6 +445,33 @@ def remote_arguments(arguments: list[str]) -> list[str]:
     return arguments
 
 
+def render_step(step: str, name: str | None, arguments: list[str]) -> int:
+    """Runs one step of render on Umbrella; see rendering.py."""
+    if step == "queue":  # on the job's node, started by the run step
+        directory, identifier, request = arguments
+        return rendering.queue(pathlib.Path(directory), identifier, request)
+    session = select_session(name)
+    config = json.loads((session / "request.json").read_text())
+    project = pathlib.Path(config["project"]).expanduser().resolve()
+    if step == "sync":
+        projectsync.receive(project, sys.stdin.buffer, sys.stdout.buffer)
+        return 0
+    if step == "stop":
+        return rendering.stop_worker(project)
+    if step == "fetch":
+        return rendering.fetch(project, arguments[0])
+    allocated = jobs(session)
+    if not allocated:
+        raise ValueError(
+            f"Session {session_id(session)} has no running job yet; check status"
+        )
+    job = rendering.Job(ROOT, session, allocated[0], project)
+    if step == "worker":
+        return rendering.start_worker(job)
+    scene, render_name, *options = arguments
+    return rendering.run(job, scene, render_name, options)
+
+
 def main() -> int:
     """Runs the requested launcher command."""
     os.umask(0o077)
@@ -429,6 +492,18 @@ def main() -> int:
         if not code:
             print(f"Installed on {args.host}. Next: {client_command(args.host)} setup")
         return code
+    if args.action == "render":
+        return rendering.client(
+            lambda arguments: ssh_command(args.host, arguments),
+            pathlib.Path(args.project),
+            args.session,
+            args.scene,
+            args.options,
+            worker=args.worker,
+            stop=args.stop_worker,
+        )
+    if args.action == "_render":
+        return render_step(args.step, args.session, args.arguments)
     if not args.remote and (os.name == "nt" or not shutil.which("sinfo")):
         if args.action == "connect":
             return connect(args.host, args.session, args.local_port, not args.no_client)

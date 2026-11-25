@@ -21,7 +21,7 @@ jobs:
       - run: ruff format --check . simproto
       - run: ruff check . simproto
       # type-check the cluster runtime as Linux on every runner
-      - run: mypy --platform linux simproto scheduler.py runtime.py relay.py desktop.py
+      - run: mypy --platform linux simproto scheduler.py runtime.py rendering.py projectsync.py relay.py desktop.py
       - run: python -m unittest discover -s tests
       - run: bash -n setup.sh probe.sh
         if: runner.os == 'Linux'

@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 runs/
 *.sif
+
+project/renders/
+project/pyrightconfig.json
+project/.lsp/
+
+.direnv

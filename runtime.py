@@ -1,4 +1,9 @@
-"""Runs Isaac inside a Slurm allocation."""
+"""Runs Isaac inside a Slurm allocation.
+
+runtime.py SESSION runs the session's mode in its own allocation;
+runtime.py SESSION -- COMMAND... runs COMMAND in the same container setup beside the
+running session, from a step of its job (srun --overlap), as render does.
+"""
 
 from __future__ import annotations
 
@@ -11,14 +16,18 @@ import sys
 import tempfile
 
 
-def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
-    """Runs the selected mode with the allocated GPUs."""
+def run(
+    session: pathlib.Path, temporary: pathlib.Path, command: list[str] | None = None
+) -> int:
+    """Runs the selected mode with the allocated GPUs, or command beside it."""
     config = json.loads((session / "request.json").read_text())
-    job = os.environ["SLURM_JOB_ID"]
-    (session / "job.id").write_text(job)
+    mode = config["mode"] if command is None else "attached"
     node = socket.gethostname().split(".")[0]
-    print(f"Allocated job {job} on {node}", flush=True)
-    if config["mode"] == "probe":
+    if command is None:
+        job = os.environ["SLURM_JOB_ID"]
+        (session / "job.id").write_text(job)
+        print(f"Allocated job {job} on {node}", flush=True)
+    if mode == "probe":
         return subprocess.call(
             ["bash", str(pathlib.Path(__file__).with_name("probe.sh"))]
         )
@@ -26,7 +35,10 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
     root = session.parent.parent
     image = root / "images/isaac-lab-3.0.0.sif"
     project = pathlib.Path(config["project"]).expanduser().resolve()
-    home = session / "home"
+    # attached commands keep their own Kit state, so they don't race the session's
+    # Isaac over its settings files
+    state = session / "attached" if command is not None else session
+    home = state / "home"
     cache = root / "cache" / node
     for directory in (
         home / ".cache",
@@ -34,7 +46,7 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
         home / "kit-data",
         cache,
         session / "output",
-        session / "kit-logs",
+        state / "kit-logs",
         temporary / "tmp",
         temporary / "var-tmp",
     ):
@@ -45,7 +57,7 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
         str(session / "output"): "/output",
         str(root / "smoke.py"): "/simproto-smoke.py",
         str(cache): "/root/.cache",
-        str(session / "kit-logs"): "/isaac-sim/kit/logs",
+        str(state / "kit-logs"): "/isaac-sim/kit/logs",
         str(home / "kit-data"): "/isaac-sim/kit/data",
         str(temporary / "tmp"): "/tmp",
         str(temporary / "var-tmp"): "/var/tmp",
@@ -80,7 +92,7 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
         if ":" in source or "," in source:
             raise ValueError("Project paths must not contain ':' or ','")
         options += ["--bind", f"{source}:{destination}"]
-    if config["mode"] == "gui":
+    if mode == "gui":
         # NVENC otherwise tries to initialize GPUs outside the Slurm allocation
         encoder_filter = temporary / "nvenc-gpu-filter.so"
         subprocess.run(
@@ -112,11 +124,11 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
     }
     for key, value in variables.items():
         env[f"APPTAINERENV_{key}"] = value
-    if config["mode"] == "gui":
+    if mode == "gui":
         env["APPTAINERENV_LD_PRELOAD"] = "/simproto-nvenc-filter.so"
 
     ports = []
-    if config["mode"] == "gui":
+    if mode == "gui":
         # hold both ports until we are ready to start Kit
         for _ in range(100):
             tcp = socket.socket()
@@ -155,10 +167,10 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
             f"--/exts/omni.kit.livestream.app/primaryStream/signalPort={signal_port}",
             f"--/exts/omni.kit.livestream.app/primaryStream/streamPort={stream_port}",
         ]
-    elif config["mode"] == "check":
+    elif mode == "check":
         app = ["/workspace/isaaclab/isaaclab.sh", "-p", "/simproto-smoke.py"]
     else:
-        app = config["command"]
+        app = config["command"] if command is None else command
         # apptainer exec does not load Docker's interactive shell aliases
         if app[0] in ("python", "python3"):
             app = ["/workspace/isaaclab/isaaclab.sh", "-p", *app[1:]]
@@ -171,10 +183,14 @@ def run(session: pathlib.Path, temporary: pathlib.Path) -> int:
 
 def main() -> int:
     """Uses job scratch for temporary files to avoid filling tmpfs."""
+    arguments = sys.argv[1:]
+    command = arguments[2:] if arguments[1:2] == ["--"] else None
+    if len(arguments) != 1 and not command:
+        raise SystemExit("usage: runtime.py SESSION [-- COMMAND...]")
     with tempfile.TemporaryDirectory(
         prefix="simproto-", dir=os.environ.get("SLURM_TMPDIR")
     ) as temporary:
-        return run(pathlib.Path(sys.argv[1]), pathlib.Path(temporary))
+        return run(pathlib.Path(arguments[0]), pathlib.Path(temporary), command)
 
 
 if __name__ == "__main__":

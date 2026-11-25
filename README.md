@@ -256,6 +256,39 @@ For a small Isaac Lab training run:
 
 Lab writes relative training logs under `/project/logs`. See the [Isaac Lab 3.0 quickstart](https://docs.nvidia.com/isaaclab/3.0/isaac-lab/quickstart) and use `isaaclab train --help` through `--mode run` for the installed CLI's options.
 
+### Render a scene headlessly
+
+Setup: after pulling changes, run `./simproto install` so the launcher on Umbrella matches your checkout. Then keep a session running (any mode); renders run inside its job, so there's no queue wait.
+
+```bash
+./simproto render project/scenes/drone-example.py --seconds 4
+```
+
+This mirrors your local `project/` to the session's project on Umbrella, renders the scene and downloads `project/renders/scenes__drone-example.mp4`, with the full log next to it. Files you delete locally are deleted there too, except `renders/`, `logs/`, `.packages/` and local tooling. Options after the scene go to `project/render.py`: `--seconds`, `--width`, `--height`, and `--eye`/`--target` to move the camera. With several sessions active, pick one with `--session ID`.
+
+Each render starts Isaac, which takes about a minute. A worker keeps Isaac loaded in the job, so later renders take seconds:
+
+```bash
+./simproto render --worker
+./simproto render --stop-worker
+```
+
+Restart the worker (`--stop-worker`, then `--worker`) after changing `render.py` or `worker.py`; scene edits apply on the next render. It stops by itself after 30 idle minutes. Its log is `renders/worker.log` in the session's project on Umbrella.
+
+A scene is a minimal Isaac Lab environment: it defines `EnvCfg` (a `DirectRLEnvCfg`) and `Env` (a `DirectRLEnv`), and optionally `policy(env, obs)`, which returns each step's actions; without it, actions are zero. The default camera view is `sim.default_visualizer_cfg`. See `scenes/drone-example.py`.
+
+### Editor support (LSP)
+
+`project/pyproject.toml` installs Isaac Sim's and Isaac Lab's Python packages locally, for type checking and completion only; code still runs in the container. It needs [uv](https://docs.astral.sh/uv/) and Python 3.12:
+
+```bash
+cd project
+uv sync                # ~5 GB
+uv run python pyright_paths.py
+```
+
+`pyright_paths.py` links Isaac's per-extension modules into `.lsp/` and writes `pyrightconfig.json`; re-run it after changing dependencies. Point your editor's interpreter at `project/.venv` and keep the pinned versions in step with the container.
+
 ## Other launcher options
 
 | Option | Use |
@@ -304,7 +337,7 @@ Local checks (use `python3` on Linux/macOS if needed):
 python -m unittest discover -s tests
 uvx ruff format --check . simproto
 uvx ruff check . simproto
-uvx --from mypy==1.15.0 mypy --platform linux simproto scheduler.py runtime.py relay.py desktop.py
+uvx --from mypy==1.15.0 mypy --platform linux simproto scheduler.py runtime.py rendering.py projectsync.py relay.py desktop.py
 ```
 
 CI runs the local tests on Linux, macOS and Windows. The type check targets Linux because the source includes the cluster runtime.
